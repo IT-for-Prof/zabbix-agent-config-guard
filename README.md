@@ -27,6 +27,7 @@ The file is the only surface there is.
 |---|---|---|
 | Agent config file | `vfs.file.contents[{$AGENT.CONF.PATH}]` | Master item, `history: 0` — nothing is stored |
 | Effective ServerActive | `agent.conf.serveractive` | Dependent, takes the **last** matching line |
+| Effective HeartbeatFrequency | `agent.conf.heartbeat` | Dependent, same last-line rule, returns the agent default 60 when absent |
 
 The last-line rule is not pedantry. A duplicated `ServerActive=` after a hand edit is applied by the
 agent in file order, so a first-match read — which is all `vfs.file.regexp` can do — reports the
@@ -39,9 +40,10 @@ Windows only, from the stock template:
 Windows: Active checks are not available   HIGH      (5 min, heartbeat)
 Windows: Zabbix agent is not available     AVERAGE   (30 min, nodata)
    └─ Zabbix agent: configuration not collected   AVERAGE   (guards the check)
-        └─ Zabbix agent: ServerActive is malformed   AVERAGE
+        ├─ Zabbix agent: ServerActive is malformed             AVERAGE
+        └─ Zabbix agent: active-check heartbeat is disabled    WARNING
 
-Linux: the same two guard triggers, with no stock parent.
+Linux: the same three guard triggers, with no stock parent.
 ```
 
 Severity is **AVERAGE** rather than WARNING for one operational reason: many estates route
@@ -88,6 +90,27 @@ dependencies are evaluated recursively.
 Where neither parent fires, the agent is alive and the fault is in the check itself — which is exactly
 what this trigger is for.
 
+### Why the heartbeat matters enough to have its own trigger
+
+`HeartbeatFrequency` (agent 6.2 and newer, default 60 s, range 0–3600, `0` disables it) is the only
+thing that lets a server tell a dead agent from a quiet one. Active checks are silent by nature — an
+item with a 1-hour interval sends nothing for an hour, and that is not a fault — so the server relies on
+the heartbeat to maintain `zabbix[host,active_agent,available]`. With `HeartbeatFrequency=0` that value
+never leaves **Unknown (0)**, and the stock *Active checks are not available* trigger waits for **2**.
+It can therefore never fire on such a host, silently, with no error anywhere.
+
+What is left there is the stock 30-minute `nodata(agent.ping)` trigger. Measured on a live fleet over
+90 days: of 43 agent outages, **17 were reported by the 30-minute trigger alone** — a 25-minute wider
+window on every one of them. That is what this trigger is for: not the outage, but the fact that the
+fast detector is switched off on this host and nobody knows.
+
+It is WARNING rather than AVERAGE because nothing is broken at the moment it fires — detection is
+degraded, which belongs on a dashboard and in a ticket rather than on a phone.
+
+The same Unknown state also occurs on agents older than 6.2, which have no heartbeat at all. This item
+cannot see that — the parameter is simply absent there and reads as the default — but `agent.version`
+from the stock template can.
+
 ## Verified behaviour
 
 Every row below was executed against a live Zabbix 7.0 server, not reasoned about — the value was
@@ -132,6 +155,24 @@ The regexp default was chosen the same way:
 
 `nodata` was measured too: with a 5 m window the trigger fires 5 m 19 s after the last value,
 identically on the master and on the dependent item.
+
+`HeartbeatFrequency` was put through the same treatment — every row executed, not reasoned about:
+
+| Config line | Stored value | Meaning |
+|---|---|---|
+| parameter absent | `60` | the agent default, which is what the agent applies |
+| `HeartbeatFrequency=60` / `=0` / `=3600` | `60` / `0` / `3600` | as written |
+| duplicate lines, `0` then `60` | `60` | last line wins, as the agent applies them |
+| duplicate lines, `60` then `0` | `0` | same rule |
+| `#HeartbeatFrequency=0` | `60` | commented out, so the default applies |
+| `  HeartbeatFrequency=0` (indented) | `60` | the agent does not accept an indented parameter |
+| `HeartbeatFrequency = 0` | `60` | nor spaces around the separator |
+| `HeartbeatFrequency= 0` | `60` | nor a leading space in the value |
+| `heartbeatfrequency=0` | `60` | parameter names are case-sensitive |
+| `HeartbeatFrequency=0   ` | `0` | trailing whitespace stripped |
+| CRLF file, `HeartbeatFrequency=0` | `0` | CR stripped |
+| last line with no newline | `0` | read correctly |
+| `HeartbeatFrequency=abc` or empty | `60` | reads as the default here; the agent refuses to start on it, which the availability triggers report |
 
 ## What it deliberately does NOT do
 

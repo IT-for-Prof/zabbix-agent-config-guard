@@ -13,6 +13,7 @@ zabbix_export:
         Scopes:
         - the effective ServerActive value, taken from the LAST matching line of the config file
         - any value that is empty, comma-separated, or contains whitespace
+        - the effective HeartbeatFrequency, and an alert when it is 0: without a heartbeat the server cannot move active-check availability away from Unknown, and the stock "Active checks are not available" trigger can never fire on that host
         - silence of the check itself: a wrong path, tightened permissions, or an agent that stopped talking
 
         Why it exists: ServerActive separates independent servers with a comma and cluster members with a semicolon. Writing "a,b" where "a;b" was meant keeps working - the agent reaches one of the addresses and data flows - so the estate looks healthy while the intended failover does not exist. No agent key and no server item returns the running configuration, so the file is the only surface available.
@@ -37,7 +38,7 @@ zabbix_export:
         License: MIT (c) 2026 Konstantin Tyutyunnik
       vendor:
         name: itforprof.com
-        version: 1.0.0
+        version: 1.1.0
       groups:
         - name: Templates/Custom
       items:
@@ -77,6 +78,30 @@ zabbix_export:
               value: agent
             - tag: scope
               value: configuration
+        - uuid: e3d7f22324ab44009e2684da91a77bd1
+          name: 'Zabbix agent: HeartbeatFrequency'
+          type: DEPENDENT
+          key: agent.conf.heartbeat
+          history: 7d
+          trends: '0'
+          value_type: UNSIGNED
+          units: s
+          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent would not accept, because that is the value the agent then applies. A non-numeric or out-of-range value reads as 60 here and stops the agent from starting at all, which the availability triggers report rather than this one.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var m = value.match(/^HeartbeatFrequency=.*$/gm);
+                  if (!m) return 60;
+                  var v = m[m.length-1].substring(19).replace(/\s+$/, '');
+                  return /^\d+$/.test(v) ? Number(v) : 60;
+          master_item:
+            key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
+          tags:
+            - tag: component
+              value: agent
+            - tag: scope
+              value: configuration
       tags:
         - tag: class
           value: monitoring
@@ -103,6 +128,7 @@ zabbix_export:
         Scopes:
         - the effective ServerActive value, taken from the LAST matching line of the config file
         - any value that is empty, comma-separated, or contains whitespace
+        - the effective HeartbeatFrequency, and an alert when it is 0: without a heartbeat the server cannot move active-check availability away from Unknown, and the stock "Active checks are not available" trigger can never fire on that host
         - silence of the check itself: a wrong path, tightened permissions, or an agent that stopped talking
 
         Why it exists: ServerActive separates independent servers with a comma and cluster members with a semicolon. Writing "a,b" where "a;b" was meant keeps working - the agent reaches one of the addresses and data flows - so the estate looks healthy while the intended failover does not exist. No agent key and no server item returns the running configuration, so the file is the only surface available.
@@ -127,7 +153,7 @@ zabbix_export:
         License: MIT (c) 2026 Konstantin Tyutyunnik
       vendor:
         name: itforprof.com
-        version: 1.0.0
+        version: 1.1.0
       groups:
         - name: Templates/Custom
       items:
@@ -167,6 +193,30 @@ zabbix_export:
               value: agent
             - tag: scope
               value: configuration
+        - uuid: 11a9d8e046b14cc799fb3bbc8d817c92
+          name: 'Zabbix agent: HeartbeatFrequency'
+          type: DEPENDENT
+          key: agent.conf.heartbeat
+          history: 7d
+          trends: '0'
+          value_type: UNSIGNED
+          units: s
+          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent would not accept, because that is the value the agent then applies. A non-numeric or out-of-range value reads as 60 here and stops the agent from starting at all, which the availability triggers report rather than this one.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var m = value.match(/^HeartbeatFrequency=.*$/gm);
+                  if (!m) return 60;
+                  var v = m[m.length-1].substring(19).replace(/\s+$/, '');
+                  return /^\d+$/.test(v) ? Number(v) : 60;
+          master_item:
+            key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
+          tags:
+            - tag: component
+              value: agent
+            - tag: scope
+              value: configuration
       tags:
         - tag: class
           value: monitoring
@@ -199,6 +249,20 @@ zabbix_export:
           value: agent
         - tag: scope
           value: configuration
+    - uuid: 2f1563041ebc46708ea312e5ca48ff2b
+      expression: 'last(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.heartbeat)=0'
+      name: 'Zabbix agent: active-check heartbeat is disabled'
+      event_name: 'HeartbeatFrequency=0 on {HOST.NAME} - the server cannot tell a dead agent from a quiet one'
+      priority: WARNING
+      description: 'With HeartbeatFrequency=0 the agent sends no heartbeat, so the server never moves zabbix[host,active_agent,available] away from Unknown and the stock "Active checks are not available" trigger, which waits for the value 2, cannot fire on this host. What is left is the 30-minute nodata() trigger on agent.ping. Measured on a live fleet: 17 agent outages out of 43 were reported by that one alone, so this is a real 25-minute widening of the window, not a theoretical one. WARNING rather than AVERAGE because nothing is broken now - detection is degraded, which belongs on a dashboard and in a ticket, not on a phone. The same Unknown state also occurs on agents older than 6.2, which have no heartbeat at all; this item cannot see that, agent.version from the stock template can.'
+      dependencies:
+        - name: 'Zabbix agent: configuration not collected'
+          expression: 'nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
+      tags:
+        - tag: component
+          value: agent
+        - tag: scope
+          value: configuration
     - uuid: 1cb58db343cd45e1902f589adf1b75e2
       expression: 'nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
       name: 'Zabbix agent: configuration not collected'
@@ -216,6 +280,20 @@ zabbix_export:
       event_name: 'ServerActive on {HOST.NAME} is {{ITEM.LASTVALUE1}.regsub("(.*)", \1)} - commas separate independent servers, semicolons separate cluster members'
       priority: AVERAGE
       description: 'The configured value does not match {$AGENT.SERVERACTIVE.MATCHES}. The usual cause is a comma where a semicolon was meant: with a comma the agent treats the addresses as independent servers and sends to each, so the intended cluster failover does not exist even though data keeps arriving. Whitespace is rejected for the same reason - Zabbix does not trim the entries, so a space becomes part of the address. An empty value means the parameter is absent or written in a form the agent would not accept. Editing the file is not enough: the agent re-reads its configuration only on restart. Depends on the collection trigger so a silent agent pages once.'
+      dependencies:
+        - name: 'Zabbix agent: configuration not collected'
+          expression: 'nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
+      tags:
+        - tag: component
+          value: agent
+        - tag: scope
+          value: configuration
+    - uuid: 2de0a5f28a894b20bdda2add6bbdb171
+      expression: 'last(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.heartbeat)=0'
+      name: 'Zabbix agent: active-check heartbeat is disabled'
+      event_name: 'HeartbeatFrequency=0 on {HOST.NAME} - the server cannot tell a dead agent from a quiet one'
+      priority: WARNING
+      description: 'With HeartbeatFrequency=0 the agent sends no heartbeat, so the server never moves zabbix[host,active_agent,available] away from Unknown and the stock "Active checks are not available" trigger, which waits for the value 2, cannot fire on this host. What is left is the 30-minute nodata() trigger on agent.ping. Measured on a live fleet: 17 agent outages out of 43 were reported by that one alone, so this is a real 25-minute widening of the window, not a theoretical one. WARNING rather than AVERAGE because nothing is broken now - detection is degraded, which belongs on a dashboard and in a ticket, not on a phone. The same Unknown state also occurs on agents older than 6.2, which have no heartbeat at all; this item cannot see that, agent.version from the stock template can.'
       dependencies:
         - name: 'Zabbix agent: configuration not collected'
           expression: 'nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
