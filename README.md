@@ -174,7 +174,7 @@ identically on the master and on the dependent item.
 | last line with no newline | `0` | read correctly |
 | `HeartbeatFrequency=abc`, empty, or `-1` | `60` | reads as the default here; the agent refuses to start on it, which the availability triggers report |
 | `HeartbeatFrequency=3600` | `3600` | the top of the documented range |
-| `HeartbeatFrequency=3601` or `=99999` | as written | **not** normalised to 60: the item shows what the file says. The agent refuses to start on an out-of-range value, and that is reported by the availability triggers and by the collection trigger, not by this item |
+| `HeartbeatFrequency=3601` or `=99999` | as written | **not** normalised to 60: the item shows what the file says. The agent refuses to start on an out-of-range value, and that is reported by the availability triggers and by the collection trigger, not by this item. A digit string past the 64-bit range is the one exception — it makes the item unsupported instead |
 
 ## What it deliberately does NOT do
 
@@ -204,7 +204,9 @@ This template reads **written intent**, not running state, and says so rather th
 - **Windows template only:** the stock **`Windows by Zabbix agent active`** must be linked to the same
   host. The collection trigger depends on its two availability triggers, and Zabbix refuses to link a
   template whose trigger dependency cannot be resolved. The Linux template has no such requirement and
-  stays self-contained — see *Triggers* for why the two differ.
+  stays self-contained — see *Triggers* for why the two differ. Note that this file carries both templates,
+  so the stock one must at least **exist** on the server for the import itself to succeed; it has to be
+  linked to the host only where the Windows variant is.
 
 ## Macros
 
@@ -228,6 +230,10 @@ kilobytes a day of history.
 
 Import `zabbix-agent-config-guard.yaml`, link the Linux or Windows template to hosts that use active
 checks. Nothing else — the macros carry working defaults.
+
+`python3 test/preprocessing_test.py` re-runs both tables above against the scripts as they ship, plus the
+dependency wiring, in about a second. It reads the scripts out of the YAML rather than copying them, so it
+cannot pass against a stale copy; it needs `node` and PyYAML and nothing else.
 
 Two notes on timing and tooling:
 
