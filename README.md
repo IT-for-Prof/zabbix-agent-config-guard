@@ -35,8 +35,13 @@ stale line and shows green on a broken host.
 ## Triggers
 
 ```
-Zabbix agent: configuration not collected   AVERAGE   (guards the check)
-   └─ Zabbix agent: ServerActive is malformed   AVERAGE
+Windows only, from the stock template:
+Windows: Active checks are not available   HIGH      (5 min, heartbeat)
+Windows: Zabbix agent is not available     AVERAGE   (30 min, nodata)
+   └─ Zabbix agent: configuration not collected   AVERAGE   (guards the check)
+        └─ Zabbix agent: ServerActive is malformed   AVERAGE
+
+Linux: the same two guard triggers, with no stock parent.
 ```
 
 Severity is **AVERAGE** rather than WARNING for one operational reason: many estates route
@@ -52,6 +57,36 @@ cause: wrong path, no read permission, or an agent that has stopped doing active
 That last case matters more than it looks. The stock *Active checks are not available* trigger fires
 on host availability **Unavailable**; a host whose availability never leaves **Unknown** is never
 covered by it. This guard does not care about the distinction.
+
+### Why the Windows template depends on the stock triggers and the Linux one does not
+
+A dead agent makes this trigger fire three hours later on top of whatever already reported the agent
+itself, so the collection trigger is a candidate for a dependency. In the Windows template it has one,
+on **both** stock availability triggers; in the Linux template it has none. That asymmetry is measured,
+not stylistic.
+
+Over 90 days on the fleet this was built for, the collection trigger fired 12 times. Four of those
+duplicated an agent-availability alert, and all four were Windows hosts. Zero Linux duplicates.
+
+The cost side decided the rest. A dependency on another template makes this one unlinkable without it —
+Zabbix refuses the link when a trigger dependency cannot be resolved, which the repository's own test
+run confirmed against a live server. Every Windows host that carries this guard runs
+`Windows by Zabbix agent active`, so the requirement costs nothing there. On Linux it would have cost
+two hosts: pfSense firewalls, which run a Zabbix agent and need this check as much as anything else on
+the fleet, but cannot take `Linux by Zabbix agent active` at all — 22 of its item keys collide with
+`Template pfSense Active`. Coupling the Linux template would have meant dropping the guard on exactly
+the two hosts whose `ServerActive` matters most, to suppress zero measured duplicates.
+
+Both stock triggers are named rather than only the faster one, because the fast one is not reliable:
+of 43 agent outages, 26 were reported by both, and **17 by the 30-minute `nodata()` trigger only** —
+the heartbeat had gone to Unknown rather than Unavailable, so the 5-minute trigger stayed silent. This
+was also reproduced live: a host with a dead agent sat at `zabbix[host,active_agent,available] = 0`
+(Unknown), not 2. Zabbix suppresses a dependent trigger while **any** parent is in PROBLEM, so naming
+both costs nothing, and `ServerActive is malformed` inherits the suppression through its own parent —
+dependencies are evaluated recursively.
+
+Where neither parent fires, the agent is alive and the fault is in the check itself — which is exactly
+what this trigger is for.
 
 ## Verified behaviour
 
@@ -123,6 +158,10 @@ This template reads **written intent**, not running state, and says so rather th
 - The config file must be under **64 KB** — the `vfs.file.contents` limit. A stock `zabbix_agent2.conf`
   is around 26 KB.
 - Link **one** of the two templates per host. Both define the same keys and Zabbix refuses the second.
+- **Windows template only:** the stock **`Windows by Zabbix agent active`** must be linked to the same
+  host. The collection trigger depends on its two availability triggers, and Zabbix refuses to link a
+  template whose trigger dependency cannot be resolved. The Linux template has no such requirement and
+  stays self-contained — see *Triggers* for why the two differ.
 
 ## Macros
 

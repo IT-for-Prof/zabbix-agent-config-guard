@@ -204,7 +204,7 @@ zabbix_export:
       name: 'Zabbix agent: configuration not collected'
       event_name: 'The config guard on {HOST.NAME} has collected nothing for {$AGENT.CONF.NODATA} - ServerActive is no longer being checked'
       priority: AVERAGE
-      description: 'This guards the check, not the agent. The ServerActive trigger is not time-based, so it is recalculated only when a new value arrives and freezes in its last state - almost always OK - the moment collection stops. Three causes, all visible in the master item error: {$AGENT.CONF.PATH} points at a file that does not exist on this host, the agent may no longer read it, or the agent has stopped performing active checks at all. The last case is the one the stock Active checks are not available trigger misses whenever host availability sits at Unknown rather than Unavailable.'
+      description: 'This guards the check, not the agent. The ServerActive trigger is not time-based, so it is recalculated only when a new value arrives and freezes in its last state - almost always OK - the moment collection stops. Three causes, all visible in the master item error: {$AGENT.CONF.PATH} points at a file that does not exist on this host, the agent may no longer read it, or the agent has stopped performing active checks at all. The last case is the one the stock Active checks are not available trigger misses whenever host availability sits at Unknown rather than Unavailable - measured on a live fleet, 17 agent outages out of 43 were reported only by the 30-minute nodata trigger. That is why this trigger depends on both stock availability triggers and not on the faster one alone. Where neither of them fires, the agent is alive and the fault is in the check itself.'
       tags:
         - tag: component
           value: agent
@@ -229,7 +229,12 @@ zabbix_export:
       name: 'Zabbix agent: configuration not collected'
       event_name: 'The config guard on {HOST.NAME} has collected nothing for {$AGENT.CONF.NODATA} - ServerActive is no longer being checked'
       priority: AVERAGE
-      description: 'This guards the check, not the agent. The ServerActive trigger is not time-based, so it is recalculated only when a new value arrives and freezes in its last state - almost always OK - the moment collection stops. Three causes, all visible in the master item error: {$AGENT.CONF.PATH} points at a file that does not exist on this host, the agent may no longer read it, or the agent has stopped performing active checks at all. The last case is the one the stock Active checks are not available trigger misses whenever host availability sits at Unknown rather than Unavailable.'
+      description: 'This guards the check, not the agent. The ServerActive trigger is not time-based, so it is recalculated only when a new value arrives and freezes in its last state - almost always OK - the moment collection stops. Three causes, all visible in the master item error: {$AGENT.CONF.PATH} points at a file that does not exist on this host, the agent may no longer read it, or the agent has stopped performing active checks at all. The last case is the one the stock Active checks are not available trigger misses whenever host availability sits at Unknown rather than Unavailable - measured on a live fleet, 17 agent outages out of 43 were reported only by the 30-minute nodata trigger. That is why this trigger depends on both stock availability triggers and not on the faster one alone. Where neither of them fires, the agent is alive and the fault is in the check itself.'
+      dependencies:
+        - name: 'Windows: Active checks are not available'
+          expression: 'min(/Windows by Zabbix agent active/zabbix[host,active_agent,available],{$AGENT.TIMEOUT})=2'
+        - name: 'Windows: Zabbix agent is not available'
+          expression: 'nodata(/Windows by Zabbix agent active/agent.ping,{$AGENT.NODATA_TIMEOUT})=1'
       tags:
         - tag: component
           value: agent
