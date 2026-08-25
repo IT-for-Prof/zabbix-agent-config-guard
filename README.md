@@ -172,7 +172,9 @@ identically on the master and on the dependent item.
 | `HeartbeatFrequency=0   ` | `0` | trailing whitespace stripped |
 | CRLF file, `HeartbeatFrequency=0` | `0` | CR stripped |
 | last line with no newline | `0` | read correctly |
-| `HeartbeatFrequency=abc` or empty | `60` | reads as the default here; the agent refuses to start on it, which the availability triggers report |
+| `HeartbeatFrequency=abc`, empty, or `-1` | `60` | reads as the default here; the agent refuses to start on it, which the availability triggers report |
+| `HeartbeatFrequency=3600` | `3600` | the top of the documented range |
+| `HeartbeatFrequency=3601` or `=99999` | as written | **not** normalised to 60: the item shows what the file says. The agent refuses to start on an out-of-range value, and that is reported by the availability triggers and by the collection trigger, not by this item |
 
 ## What it deliberately does NOT do
 

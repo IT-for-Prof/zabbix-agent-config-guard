@@ -86,7 +86,7 @@ zabbix_export:
           trends: '0'
           value_type: UNSIGNED
           units: s
-          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent would not accept, because that is the value the agent then applies. A non-numeric or out-of-range value reads as 60 here and stops the agent from starting at all, which the availability triggers report rather than this one.'
+          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent ignores, because that is the value the agent then applies; the same 60 covers a non-numeric or negative value. A number outside the documented 0-3600 range is stored as written rather than normalised, so Latest data shows what the file actually says: the agent refuses to start on such a value, and that is reported by the availability triggers and by the collection trigger here, not by this item.'
           preprocessing:
             - type: JAVASCRIPT
               parameters:
@@ -201,7 +201,7 @@ zabbix_export:
           trends: '0'
           value_type: UNSIGNED
           units: s
-          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent would not accept, because that is the value the agent then applies. A non-numeric or out-of-range value reads as 60 here and stops the agent from starting at all, which the availability triggers report rather than this one.'
+          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent ignores, because that is the value the agent then applies; the same 60 covers a non-numeric or negative value. A number outside the documented 0-3600 range is stored as written rather than normalised, so Latest data shows what the file actually says: the agent refuses to start on such a value, and that is reported by the availability triggers and by the collection trigger here, not by this item.'
           preprocessing:
             - type: JAVASCRIPT
               parameters:
