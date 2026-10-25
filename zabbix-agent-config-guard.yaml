@@ -1,322 +1,436 @@
 zabbix_export:
   version: '7.0'
   template_groups:
-    - uuid: 55d204abe0194f81b872859ef4d95fb1
-      name: Templates/Custom
+  - uuid: 57b7ae836ca64446ba2c296389c009b7
+    name: Templates/Modules
   templates:
-    - uuid: 27ec88946c4a47279d5308abc7c011b9
-      template: 'Zabbix agent config guard Linux by Zabbix agent active'
-      name: 'Zabbix agent config guard Linux by Zabbix agent active'
-      description: |
-        Reads the Zabbix agent's own configuration file and alerts when ServerActive is malformed.
+  - uuid: 27ec88946c4a47279d5308abc7c011b9
+    template: Zabbix agent config guard Linux by Zabbix agent active
+    name: Zabbix agent config guard Linux by Zabbix agent active
+    description: |
+      Checks ServerActive policy and active-check heartbeat settings in the agent configuration file.
 
-        Scopes:
-        - the effective ServerActive value, taken from the LAST matching line of the config file
-        - any value that is empty, comma-separated, or contains whitespace
-        - the effective HeartbeatFrequency, and an alert when it is 0: without a heartbeat the server cannot move active-check availability away from Unknown, and the stock "Active checks are not available" trigger can never fire on that host
-        - silence of the check itself: a wrong path, tightened permissions, or an agent that stopped talking
+      Collects the file once per hour. Reads the last matching ServerActive and HeartbeatFrequency declarations, allowing surrounding whitespace. The default ServerActive policy rejects empty values, commas and internal whitespace; this is a deployment policy, not a complete validator of Zabbix configuration syntax. Independent servers separated by commas and spaces in address lists are supported by Zabbix itself.
 
-        Why it exists: ServerActive separates independent servers with a comma and cluster members with a semicolon. Writing "a,b" where "a;b" was meant keeps working - the agent reaches one of the addresses and data flows - so the estate looks healthy while the intended failover does not exist. No agent key and no server item returns the running configuration, so the file is the only surface available.
+      HeartbeatFrequency is reported in seconds; 0 disables the heartbeat. An absent declaration means 60 seconds. Unrecognized or out-of-range declarations produce an item preprocessing error. Supported interval spellings cover agent 2 and classic-agent suffixes; extraction does not prove that the installed agent accepts a particular spelling. A collection trigger checks that both derived items receive data within the configured window.
 
-        NOT available here: the RUNNING configuration. This template reads written intent. A file edited without restarting the agent reads as fixed while the old value is still in effect, and the reverse. Nor can it see a ServerActive set inside an Include file, or judge whether the address is the right one for the proxy the host is assigned to.
+      Applicability:
+      - Active Zabbix agent checks; agent 2 versions 7.0.0 and 7.0.32 were used to check the revised parsing rules.
+      - Heartbeat availability requires agent version 6.2 or newer.
+      - Self-contained on Linux and pfSense. Add host-level dependencies on the local agent-availability triggers during deployment; no Linux OS template is required by this export.
+      - Link only one OS variant; both define the same item keys.
 
-        Macros:
-        - {$AGENT.CONF.PATH} - absolute path of the agent config file (default /etc/zabbix/zabbix_agent2.conf)
-        - {$AGENT.SERVERACTIVE.MATCHES} - regexp every legitimate value must match (default ^[^,\s]+$ - one address, or semicolon-separated cluster members, with no commas and no whitespace)
-        - {$AGENT.CONF.NODATA} - how long the check itself may collect nothing before alerting (time unit, default 3h, roughly 3x the item interval)
+      Limitations:
+      - Reads the selected file, not the running configuration; connection settings require an agent restart to take effect.
+      - Include files are not read. A later declaration in an included file may change the value used by the agent.
+      - Does not validate DNS, network reachability, or whether an address matches the assigned proxy.
+      - The agent must be able to read the file. vfs.file.contents and agent-version limits apply; 64 KB is not a universal limit.
+      - The raw file is transferred to the server/proxy for preprocessing and is not retained in item history.
 
-        Scope of application: hosts that use active checks. On a passive-only host ServerActive is never used, so a stale value there is dormant rather than operational - link this template when such a host is converted to active checks.
+      Macros:
+      - {$AGENT.CONF.PATH}: configuration path; default /etc/zabbix/zabbix_agent2.conf.
+      - {$AGENT.SERVERACTIVE.MATCHES}: expected ServerActive regexp; default ^[^,\s]+$.
+      - {$AGENT.CONF.NODATA}: missing-data window; default 3h for the 1h collection interval.
 
-        Requirements:
-        - Zabbix agent 2 or agent 1 with active checks enabled
-        - the agent must be able to read its own config file, and the file must be under 64 KB, which is the vfs.file.contents limit
-        - link only ONE of the two templates in this repo to a host; both define the same keys and Zabbix will refuse the second
-        - Windows variant only: the stock "Windows by Zabbix agent active" must be linked to the same host, because the collection trigger depends on its two availability triggers and Zabbix refuses to link a template whose dependency cannot resolve. The Linux variant carries no such requirement on purpose - see the repository README
-
-        Author:  Konstantin Tyutyunnik / Константин Тютюнник
-        Site:    https://itforprof.com
-        Repo:    https://github.com/IT-for-Prof/zabbix-agent-config-guard
-        License: MIT (c) 2026 Konstantin Tyutyunnik
-      vendor:
-        name: itforprof.com
-        version: 1.1.0
-      groups:
-        - name: Templates/Custom
-      items:
-        - uuid: 5e453bc723704d32985ebc9edaf7128a
-          name: 'Zabbix agent: configuration file'
-          type: ZABBIX_ACTIVE
-          key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
-          delay: 1h
-          history: '0'
-          trends: '0'
-          value_type: TEXT
-          description: 'Raw contents of the agent config file, used only as a master item. History is deliberately 0: the file carries paths and identities that have no business sitting in the history tables, and nothing here needs to be stored. If this item goes unsupported the dependent item inherits the error, so the reason - wrong path, no read permission, file gone - is visible without opening the host.'
-          tags:
-            - tag: component
-              value: agent
-            - tag: scope
-              value: configuration
-        - uuid: 0f4da753721344a0be0b71f278b280a1
-          name: 'Zabbix agent: ServerActive'
-          type: DEPENDENT
-          key: agent.conf.serveractive
-          history: 7d
-          trends: '0'
-          value_type: CHAR
-          description: 'The ServerActive value the agent would use. Takes the LAST matching line, because a duplicated parameter is applied by the agent in that order and a first-match read would report a stale value while the host is broken. Returns an empty string when the parameter is absent, commented out, or written in a form the agent itself would not accept - an empty value fails the macro regexp and therefore alerts, instead of leaving the trigger unevaluated.'
-          preprocessing:
-            - type: JAVASCRIPT
-              parameters:
-                - |
-                  var m = value.match(/^ServerActive=.*$/gm);
-                  if (!m) return '';
-                  return m[m.length-1].substring(13).replace(/\s+$/, '');
-          master_item:
-            key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
-          tags:
-            - tag: component
-              value: agent
-            - tag: scope
-              value: configuration
-        - uuid: e3d7f22324ab44009e2684da91a77bd1
-          name: 'Zabbix agent: HeartbeatFrequency'
-          type: DEPENDENT
-          key: agent.conf.heartbeat
-          history: 7d
-          trends: '0'
-          value_type: UNSIGNED
-          units: s
-          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent ignores, because that is the value the agent then applies; the same 60 covers a non-numeric or negative value. A number outside the documented 0-3600 range is stored as written rather than normalised, so Latest data shows what the file actually says: the agent refuses to start on such a value, and that is reported by the availability triggers and by the collection trigger here, not by this item.'
-          preprocessing:
-            - type: JAVASCRIPT
-              parameters:
-                - |
-                  var m = value.match(/^HeartbeatFrequency=.*$/gm);
-                  if (!m) return 60;
-                  var v = m[m.length-1].substring(19).replace(/\s+$/, '');
-                  return /^\d+$/.test(v) ? Number(v) : 60;
-          master_item:
-            key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
-          tags:
-            - tag: component
-              value: agent
-            - tag: scope
-              value: configuration
+      Author:  Konstantin Tyutyunnik / Константин Тютюнник
+      Site:    https://itforprof.com
+      Repo:    https://github.com/IT-for-Prof/zabbix-agent-config-guard
+      License: MIT (c) 2026 Konstantin Tyutyunnik
+    vendor:
+      name: itforprof.com
+      version: 1.2.0
+    groups:
+    - name: Templates/Modules
+    items:
+    - uuid: 5e453bc723704d32985ebc9edaf7128a
+      name: 'Zabbix agent: configuration file'
+      type: ZABBIX_ACTIVE
+      key: vfs.file.contents["{$AGENT.CONF.PATH}"]
+      delay: 1h
+      history: '0'
+      trends: '0'
+      value_type: TEXT
+      description: Raw configuration file for dependent-item preprocessing. No history is retained. When collection
+        stops, inspect this item for file/path/permission errors and check agent availability; a silent active agent
+        may leave no item error. vfs.file.contents size limits depend on the agent version.
       tags:
-        - tag: class
-          value: monitoring
-        - tag: target
-          value: zabbix-agent
-        - tag: vendor
-          value: zabbix
-      macros:
-        - macro: '{$AGENT.CONF.NODATA}'
-          value: 3h
-          description: 'How long the guard itself may collect nothing before alerting. Roughly 3x the 1h item interval. Without it a stalled check stays silently OK, because the ServerActive trigger only re-evaluates when a value arrives.'
-        - macro: '{$AGENT.CONF.PATH}'
-          value: /etc/zabbix/zabbix_agent2.conf
-          description: 'Absolute path of the agent config file. Use /etc/zabbix/zabbix_agentd.conf for agent 1. A wrong path makes the master item unsupported, which the collection trigger reports.'
-        - macro: '{$AGENT.SERVERACTIVE.MATCHES}'
-          value: '^[^,\s]+$'
-          description: 'Regexp every legitimate ServerActive must match. The default forbids commas and whitespace, which passes a single address and a semicolon-separated cluster and rejects every malformed separator. Tighten it to an exact expected value if the estate has only one.'
-    - uuid: 4085f1d7b555411abef7956d83212024
-      template: 'Zabbix agent config guard Windows by Zabbix agent active'
-      name: 'Zabbix agent config guard Windows by Zabbix agent active'
-      description: |
-        Reads the Zabbix agent's own configuration file and alerts when ServerActive is malformed.
-
-        Scopes:
-        - the effective ServerActive value, taken from the LAST matching line of the config file
-        - any value that is empty, comma-separated, or contains whitespace
-        - the effective HeartbeatFrequency, and an alert when it is 0: without a heartbeat the server cannot move active-check availability away from Unknown, and the stock "Active checks are not available" trigger can never fire on that host
-        - silence of the check itself: a wrong path, tightened permissions, or an agent that stopped talking
-
-        Why it exists: ServerActive separates independent servers with a comma and cluster members with a semicolon. Writing "a,b" where "a;b" was meant keeps working - the agent reaches one of the addresses and data flows - so the estate looks healthy while the intended failover does not exist. No agent key and no server item returns the running configuration, so the file is the only surface available.
-
-        NOT available here: the RUNNING configuration. This template reads written intent. A file edited without restarting the agent reads as fixed while the old value is still in effect, and the reverse. Nor can it see a ServerActive set inside an Include file, or judge whether the address is the right one for the proxy the host is assigned to.
-
-        Macros:
-        - {$AGENT.CONF.PATH} - absolute path of the agent config file (default C:\Program Files\Zabbix Agent 2\zabbix_agent2.conf)
-        - {$AGENT.SERVERACTIVE.MATCHES} - regexp every legitimate value must match (default ^[^,\s]+$ - one address, or semicolon-separated cluster members, with no commas and no whitespace)
-        - {$AGENT.CONF.NODATA} - how long the check itself may collect nothing before alerting (time unit, default 3h, roughly 3x the item interval)
-
-        Scope of application: hosts that use active checks. On a passive-only host ServerActive is never used, so a stale value there is dormant rather than operational - link this template when such a host is converted to active checks.
-
-        Requirements:
-        - Zabbix agent 2 or agent 1 with active checks enabled
-        - the agent must be able to read its own config file, and the file must be under 64 KB, which is the vfs.file.contents limit
-        - link only ONE of the two templates in this repo to a host; both define the same keys and Zabbix will refuse the second
-        - Windows variant only: the stock "Windows by Zabbix agent active" must be linked to the same host, because the collection trigger depends on its two availability triggers and Zabbix refuses to link a template whose dependency cannot resolve. The Linux variant carries no such requirement on purpose - see the repository README
-
-        Author:  Konstantin Tyutyunnik / Константин Тютюнник
-        Site:    https://itforprof.com
-        Repo:    https://github.com/IT-for-Prof/zabbix-agent-config-guard
-        License: MIT (c) 2026 Konstantin Tyutyunnik
-      vendor:
-        name: itforprof.com
-        version: 1.1.0
-      groups:
-        - name: Templates/Custom
-      items:
-        - uuid: cedff1bd33704644b23196bb6944d3ec
-          name: 'Zabbix agent: configuration file'
-          type: ZABBIX_ACTIVE
-          key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
-          delay: 1h
-          history: '0'
-          trends: '0'
-          value_type: TEXT
-          description: 'Raw contents of the agent config file, used only as a master item. History is deliberately 0: the file carries paths and identities that have no business sitting in the history tables, and nothing here needs to be stored. If this item goes unsupported the dependent item inherits the error, so the reason - wrong path, no read permission, file gone - is visible without opening the host.'
-          tags:
-            - tag: component
-              value: agent
-            - tag: scope
-              value: configuration
-        - uuid: 51b93f31fcef4c949eed3f579da2fcfa
-          name: 'Zabbix agent: ServerActive'
-          type: DEPENDENT
-          key: agent.conf.serveractive
-          history: 7d
-          trends: '0'
-          value_type: CHAR
-          description: 'The ServerActive value the agent would use. Takes the LAST matching line, because a duplicated parameter is applied by the agent in that order and a first-match read would report a stale value while the host is broken. Returns an empty string when the parameter is absent, commented out, or written in a form the agent itself would not accept - an empty value fails the macro regexp and therefore alerts, instead of leaving the trigger unevaluated.'
-          preprocessing:
-            - type: JAVASCRIPT
-              parameters:
-                - |
-                  var m = value.match(/^ServerActive=.*$/gm);
-                  if (!m) return '';
-                  return m[m.length-1].substring(13).replace(/\s+$/, '');
-          master_item:
-            key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
-          tags:
-            - tag: component
-              value: agent
-            - tag: scope
-              value: configuration
-        - uuid: 11a9d8e046b14cc799fb3bbc8d817c92
-          name: 'Zabbix agent: HeartbeatFrequency'
-          type: DEPENDENT
-          key: agent.conf.heartbeat
-          history: 7d
-          trends: '0'
-          value_type: UNSIGNED
-          units: s
-          description: 'The heartbeat interval the agent would use, taken from the LAST matching line for the same reason as ServerActive. Returns 60 - the agent default - when the parameter is absent, commented out, or written in a form the agent ignores, because that is the value the agent then applies; the same 60 covers a non-numeric or negative value. A number outside the documented 0-3600 range is stored as written rather than normalised, so Latest data shows what the file actually says: the agent refuses to start on such a value, and that is reported by the availability triggers and by the collection trigger here, not by this item.'
-          preprocessing:
-            - type: JAVASCRIPT
-              parameters:
-                - |
-                  var m = value.match(/^HeartbeatFrequency=.*$/gm);
-                  if (!m) return 60;
-                  var v = m[m.length-1].substring(19).replace(/\s+$/, '');
-                  return /^\d+$/.test(v) ? Number(v) : 60;
-          master_item:
-            key: 'vfs.file.contents["{$AGENT.CONF.PATH}"]'
-          tags:
-            - tag: component
-              value: agent
-            - tag: scope
-              value: configuration
+      - tag: component
+        value: agent
+      - tag: scope
+        value: configuration
+      - tag: check
+        value: configuration_collection
+    - uuid: 0f4da753721344a0be0b71f278b280a1
+      name: 'Zabbix agent: ServerActive'
+      type: DEPENDENT
+      key: agent.conf.serveractive
+      history: 7d
+      trends: '0'
+      # shortcut: 255-character ServerActive limit; migrate to TEXT when longer lists are required.
+      value_type: CHAR
+      description: Last ServerActive declaration in the selected file, with surrounding whitespace removed. Empty
+        when absent. Include files and running state are outside this item. The policy regexp is configurable and
+        is not a full syntax validator.
+      preprocessing:
+      - type: JAVASCRIPT
+        parameters:
+        - |
+          var m = value.match(/^[ \t]*ServerActive[ \t]*=.*$/gm);
+          if (!m) return '';
+          var line = m[m.length - 1];
+          return line.substring(line.indexOf('=') + 1).replace(/^\s+|\s+$/g, '');
+      master_item:
+        key: vfs.file.contents["{$AGENT.CONF.PATH}"]
       tags:
-        - tag: class
-          value: monitoring
-        - tag: target
-          value: zabbix-agent
-        - tag: vendor
-          value: zabbix
-      macros:
-        - macro: '{$AGENT.CONF.NODATA}'
-          value: 3h
-          description: 'How long the guard itself may collect nothing before alerting. Roughly 3x the 1h item interval. Without it a stalled check stays silently OK, because the ServerActive trigger only re-evaluates when a value arrives.'
-        - macro: '{$AGENT.CONF.PATH}'
-          value: C:\Program Files\Zabbix Agent 2\zabbix_agent2.conf
-          description: 'Absolute path of the agent config file. Use C:\Program Files\Zabbix Agent\zabbix_agentd.conf for agent 1. A wrong path makes the master item unsupported, which the collection trigger reports.'
-        - macro: '{$AGENT.SERVERACTIVE.MATCHES}'
-          value: '^[^,\s]+$'
-          description: 'Regexp every legitimate ServerActive must match. The default forbids commas and whitespace, which passes a single address and a semicolon-separated cluster and rejects every malformed separator. Tighten it to an exact expected value if the estate has only one.'
+      - tag: component
+        value: agent
+      - tag: scope
+        value: configuration
+      - tag: check
+        value: serveractive
+    - uuid: e3d7f22324ab44009e2684da91a77bd1
+      name: 'Zabbix agent: HeartbeatFrequency'
+      type: DEPENDENT
+      key: agent.conf.heartbeat
+      history: 7d
+      trends: '0'
+      value_type: UNSIGNED
+      units: s
+      description: Last HeartbeatFrequency declaration in the selected file, normalized to seconds. Accepts agent
+        2 interval suffixes s/m/h/d/w and classic-agent binary suffixes K/M/G/T. This extraction is not a syntax
+        check for the installed agent family. The absent parameter defaults to 60; an explicitly empty value is
+        interpreted as 0 according to agent 2 rules. Unrecognized values and intervals outside 0-3600 seconds produce
+        a preprocessing error. Include files and running state are not inspected.
+      preprocessing:
+      - type: JAVASCRIPT
+        parameters:
+        - |
+          var m = value.match(/^[ \t]*HeartbeatFrequency[ \t]*=.*$/gm);
+          if (!m) return 60;
+          var line = m[m.length - 1];
+          var raw = line.substring(line.indexOf('=') + 1).replace(/^\s+|\s+$/g, '');
+          if (raw === '') return 0;
+          var n = raw.match(/^([+-]?\d+)([smhdwKMGT]?)$/);
+          if (!n) throw 'Invalid HeartbeatFrequency: expected an integer interval';
+          var seconds = Number(n[1]) * ({'': 1, s: 1, m: 60, h: 3600, d: 86400, w: 604800, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776})[n[2]];
+          if (seconds < 0 || seconds > 3600) throw 'Invalid HeartbeatFrequency: expected 0-3600 seconds';
+          return seconds;
+      master_item:
+        key: vfs.file.contents["{$AGENT.CONF.PATH}"]
+      tags:
+      - tag: component
+        value: agent
+      - tag: scope
+        value: configuration
+      - tag: check
+        value: heartbeat
+    tags:
+    - tag: class
+      value: monitoring
+    - tag: target
+      value: zabbix-agent
+    - tag: vendor
+      value: zabbix
+    macros:
+    - macro: '{$AGENT.CONF.NODATA}'
+      value: 3h
+      description: How long either derived configuration item may receive no data before alerting. Default 3h, three
+        times the 1h file collection interval. Do not enable discard-unchanged preprocessing on the collection chain
+        without revisiting this window.
+    - macro: '{$AGENT.CONF.PATH}'
+      value: /etc/zabbix/zabbix_agent2.conf
+      description: Absolute path of the agent config file. Use /etc/zabbix/zabbix_agentd.conf for agent 1. A wrong
+        path makes the master item unsupported, which the collection trigger reports.
+    - macro: '{$AGENT.SERVERACTIVE.MATCHES}'
+      value: ^[^,\s]+$
+      description: 'Deployment policy for the extracted ServerActive value. Default: nonempty, no commas and no
+        internal whitespace. Zabbix supports independent servers and address-list whitespace; rejecting them is
+        this policy, not a claim about Zabbix syntax. Override on a host when its intended topology differs.'
+  - uuid: 4085f1d7b555411abef7956d83212024
+    template: Zabbix agent config guard Windows by Zabbix agent active
+    name: Zabbix agent config guard Windows by Zabbix agent active
+    description: |
+      Checks ServerActive policy and active-check heartbeat settings in the agent configuration file.
+
+      Collects the file once per hour. Reads the last matching ServerActive and HeartbeatFrequency declarations, allowing surrounding whitespace. The default ServerActive policy rejects empty values, commas and internal whitespace; this is a deployment policy, not a complete validator of Zabbix configuration syntax. Independent servers separated by commas and spaces in address lists are supported by Zabbix itself.
+
+      HeartbeatFrequency is reported in seconds; 0 disables the heartbeat. An absent declaration means 60 seconds. Unrecognized or out-of-range declarations produce an item preprocessing error. Supported interval spellings cover agent 2 and classic-agent suffixes; extraction does not prove that the installed agent accepts a particular spelling. A collection trigger checks that both derived items receive data within the configured window.
+
+      Applicability:
+      - Active Zabbix agent checks; agent 2 versions 7.0.0 and 7.0.32 were used to check the revised parsing rules.
+      - Heartbeat availability requires agent version 6.2 or newer.
+      - The stock Windows by Zabbix agent active template must be linked; both of its availability triggers are dependency parents.
+      - Link only one OS variant; both define the same item keys.
+
+      Limitations:
+      - Reads the selected file, not the running configuration; connection settings require an agent restart to take effect.
+      - Include files are not read. A later declaration in an included file may change the value used by the agent.
+      - Does not validate DNS, network reachability, or whether an address matches the assigned proxy.
+      - The agent must be able to read the file. vfs.file.contents and agent-version limits apply; 64 KB is not a universal limit.
+      - The raw file is transferred to the server/proxy for preprocessing and is not retained in item history.
+
+      Macros:
+      - {$AGENT.CONF.PATH}: configuration path; default C:\Program Files\Zabbix Agent 2\zabbix_agent2.conf.
+      - {$AGENT.SERVERACTIVE.MATCHES}: expected ServerActive regexp; default ^[^,\s]+$.
+      - {$AGENT.CONF.NODATA}: missing-data window; default 3h for the 1h collection interval.
+
+      Author:  Konstantin Tyutyunnik / Константин Тютюнник
+      Site:    https://itforprof.com
+      Repo:    https://github.com/IT-for-Prof/zabbix-agent-config-guard
+      License: MIT (c) 2026 Konstantin Tyutyunnik
+    vendor:
+      name: itforprof.com
+      version: 1.2.0
+    groups:
+    - name: Templates/Modules
+    items:
+    - uuid: cedff1bd33704644b23196bb6944d3ec
+      name: 'Zabbix agent: configuration file'
+      type: ZABBIX_ACTIVE
+      key: vfs.file.contents["{$AGENT.CONF.PATH}"]
+      delay: 1h
+      history: '0'
+      trends: '0'
+      value_type: TEXT
+      description: Raw configuration file for dependent-item preprocessing. No history is retained. When collection
+        stops, inspect this item for file/path/permission errors and check agent availability; a silent active agent
+        may leave no item error. vfs.file.contents size limits depend on the agent version.
+      tags:
+      - tag: component
+        value: agent
+      - tag: scope
+        value: configuration
+      - tag: check
+        value: configuration_collection
+    - uuid: 51b93f31fcef4c949eed3f579da2fcfa
+      name: 'Zabbix agent: ServerActive'
+      type: DEPENDENT
+      key: agent.conf.serveractive
+      history: 7d
+      trends: '0'
+      # shortcut: 255-character ServerActive limit; migrate to TEXT when longer lists are required.
+      value_type: CHAR
+      description: Last ServerActive declaration in the selected file, with surrounding whitespace removed. Empty
+        when absent. Include files and running state are outside this item. The policy regexp is configurable and
+        is not a full syntax validator.
+      preprocessing:
+      - type: JAVASCRIPT
+        parameters:
+        - |
+          var m = value.match(/^[ \t]*ServerActive[ \t]*=.*$/gm);
+          if (!m) return '';
+          var line = m[m.length - 1];
+          return line.substring(line.indexOf('=') + 1).replace(/^\s+|\s+$/g, '');
+      master_item:
+        key: vfs.file.contents["{$AGENT.CONF.PATH}"]
+      tags:
+      - tag: component
+        value: agent
+      - tag: scope
+        value: configuration
+      - tag: check
+        value: serveractive
+    - uuid: 11a9d8e046b14cc799fb3bbc8d817c92
+      name: 'Zabbix agent: HeartbeatFrequency'
+      type: DEPENDENT
+      key: agent.conf.heartbeat
+      history: 7d
+      trends: '0'
+      value_type: UNSIGNED
+      units: s
+      description: Last HeartbeatFrequency declaration in the selected file, normalized to seconds. Accepts agent
+        2 interval suffixes s/m/h/d/w and classic-agent binary suffixes K/M/G/T. This extraction is not a syntax
+        check for the installed agent family. The absent parameter defaults to 60; an explicitly empty value is
+        interpreted as 0 according to agent 2 rules. Unrecognized values and intervals outside 0-3600 seconds produce
+        a preprocessing error. Include files and running state are not inspected.
+      preprocessing:
+      - type: JAVASCRIPT
+        parameters:
+        - |
+          var m = value.match(/^[ \t]*HeartbeatFrequency[ \t]*=.*$/gm);
+          if (!m) return 60;
+          var line = m[m.length - 1];
+          var raw = line.substring(line.indexOf('=') + 1).replace(/^\s+|\s+$/g, '');
+          if (raw === '') return 0;
+          var n = raw.match(/^([+-]?\d+)([smhdwKMGT]?)$/);
+          if (!n) throw 'Invalid HeartbeatFrequency: expected an integer interval';
+          var seconds = Number(n[1]) * ({'': 1, s: 1, m: 60, h: 3600, d: 86400, w: 604800, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776})[n[2]];
+          if (seconds < 0 || seconds > 3600) throw 'Invalid HeartbeatFrequency: expected 0-3600 seconds';
+          return seconds;
+      master_item:
+        key: vfs.file.contents["{$AGENT.CONF.PATH}"]
+      tags:
+      - tag: component
+        value: agent
+      - tag: scope
+        value: configuration
+      - tag: check
+        value: heartbeat
+    tags:
+    - tag: class
+      value: monitoring
+    - tag: target
+      value: zabbix-agent
+    - tag: vendor
+      value: zabbix
+    macros:
+    - macro: '{$AGENT.CONF.NODATA}'
+      value: 3h
+      description: How long either derived configuration item may receive no data before alerting. Default 3h, three
+        times the 1h file collection interval. Do not enable discard-unchanged preprocessing on the collection chain
+        without revisiting this window.
+    - macro: '{$AGENT.CONF.PATH}'
+      value: C:\Program Files\Zabbix Agent 2\zabbix_agent2.conf
+      description: Absolute path of the agent config file. Use C:\Program Files\Zabbix Agent\zabbix_agentd.conf
+        for agent 1. A wrong path makes the master item unsupported, which the collection trigger reports.
+    - macro: '{$AGENT.SERVERACTIVE.MATCHES}'
+      value: ^[^,\s]+$
+      description: 'Deployment policy for the extracted ServerActive value. Default: nonempty, no commas and no
+        internal whitespace. Zabbix supports independent servers and address-list whitespace; rejecting them is
+        this policy, not a claim about Zabbix syntax. Override on a host when its intended topology differs.'
   triggers:
-    - uuid: a1378435c5eb44abac42966b4c268fef
-      expression: 'find(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,,"regexp","{$AGENT.SERVERACTIVE.MATCHES}")=0'
-      name: 'Zabbix agent: ServerActive is malformed'
-      event_name: 'ServerActive on {HOST.NAME} is {{ITEM.LASTVALUE1}.regsub("(.*)", \1)} - commas separate independent servers, semicolons separate cluster members'
-      priority: AVERAGE
-      description: 'The configured value does not match {$AGENT.SERVERACTIVE.MATCHES}. The usual cause is a comma where a semicolon was meant: with a comma the agent treats the addresses as independent servers and sends to each, so the intended cluster failover does not exist even though data keeps arriving. Whitespace is rejected for the same reason - Zabbix does not trim the entries, so a space becomes part of the address. An empty value means the parameter is absent or written in a form the agent would not accept. Editing the file is not enough: the agent re-reads its configuration only on restart. Depends on the collection trigger so a silent agent pages once.'
-      dependencies:
-        - name: 'Zabbix agent: configuration not collected'
-          expression: 'nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
-      tags:
-        - tag: component
-          value: agent
-        - tag: scope
-          value: configuration
-    - uuid: 2f1563041ebc46708ea312e5ca48ff2b
-      expression: 'last(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.heartbeat)=0'
-      name: 'Zabbix agent: active-check heartbeat is disabled'
-      event_name: 'HeartbeatFrequency=0 on {HOST.NAME} - the server cannot tell a dead agent from a quiet one'
-      priority: WARNING
-      description: 'With HeartbeatFrequency=0 the agent sends no heartbeat, so the server never moves zabbix[host,active_agent,available] away from Unknown and the stock "Active checks are not available" trigger, which waits for the value 2, cannot fire on this host. What is left is the 30-minute nodata() trigger on agent.ping. Measured on a live fleet: 17 agent outages out of 43 were reported by that one alone, so this is a real 25-minute widening of the window, not a theoretical one. WARNING rather than AVERAGE because nothing is broken now - detection is degraded, which belongs on a dashboard and in a ticket, not on a phone. The same Unknown state also occurs on agents older than 6.2, which have no heartbeat at all; this item cannot see that, agent.version from the stock template can.'
-      dependencies:
-        - name: 'Zabbix agent: configuration not collected'
-          expression: 'nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
-      tags:
-        - tag: component
-          value: agent
-        - tag: scope
-          value: configuration
-    - uuid: 1cb58db343cd45e1902f589adf1b75e2
-      expression: 'nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
-      name: 'Zabbix agent: configuration not collected'
-      event_name: 'The config guard on {HOST.NAME} has collected nothing for {$AGENT.CONF.NODATA} - ServerActive is no longer being checked'
-      priority: AVERAGE
-      description: 'This guards the check, not the agent. The ServerActive trigger is not time-based, so it is recalculated only when a new value arrives and freezes in its last state - almost always OK - the moment collection stops. Three causes, all visible in the master item error: {$AGENT.CONF.PATH} points at a file that does not exist on this host, the agent may no longer read it, or the agent has stopped performing active checks at all. The last case is the one the stock Active checks are not available trigger misses whenever host availability sits at Unknown rather than Unavailable - measured on a live fleet, 17 agent outages out of 43 were reported only by the 30-minute nodata trigger. The Windows variant of this template therefore depends on both stock availability triggers rather than the faster one alone. This Linux variant declares no such dependency and is self-contained: on the fleet it was built for, two pfSense firewalls run a Zabbix agent but cannot carry the stock Linux template at all - 22 of its item keys collide with Template pfSense Active - and a dependency that cannot resolve makes this template unlinkable there. The cost is that on Linux a dead agent is reported both by the stock trigger and, three hours later, by this one.'
-      tags:
-        - tag: component
-          value: agent
-        - tag: scope
-          value: configuration
-    - uuid: d1724054d1694813b8cb87a93e9d9e97
-      expression: 'find(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,,"regexp","{$AGENT.SERVERACTIVE.MATCHES}")=0'
-      name: 'Zabbix agent: ServerActive is malformed'
-      event_name: 'ServerActive on {HOST.NAME} is {{ITEM.LASTVALUE1}.regsub("(.*)", \1)} - commas separate independent servers, semicolons separate cluster members'
-      priority: AVERAGE
-      description: 'The configured value does not match {$AGENT.SERVERACTIVE.MATCHES}. The usual cause is a comma where a semicolon was meant: with a comma the agent treats the addresses as independent servers and sends to each, so the intended cluster failover does not exist even though data keeps arriving. Whitespace is rejected for the same reason - Zabbix does not trim the entries, so a space becomes part of the address. An empty value means the parameter is absent or written in a form the agent would not accept. Editing the file is not enough: the agent re-reads its configuration only on restart. Depends on the collection trigger so a silent agent pages once.'
-      dependencies:
-        - name: 'Zabbix agent: configuration not collected'
-          expression: 'nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
-      tags:
-        - tag: component
-          value: agent
-        - tag: scope
-          value: configuration
-    - uuid: 2de0a5f28a894b20bdda2add6bbdb171
-      expression: 'last(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.heartbeat)=0'
-      name: 'Zabbix agent: active-check heartbeat is disabled'
-      event_name: 'HeartbeatFrequency=0 on {HOST.NAME} - the server cannot tell a dead agent from a quiet one'
-      priority: WARNING
-      description: 'With HeartbeatFrequency=0 the agent sends no heartbeat, so the server never moves zabbix[host,active_agent,available] away from Unknown and the stock "Active checks are not available" trigger, which waits for the value 2, cannot fire on this host. What is left is the 30-minute nodata() trigger on agent.ping. Measured on a live fleet: 17 agent outages out of 43 were reported by that one alone, so this is a real 25-minute widening of the window, not a theoretical one. WARNING rather than AVERAGE because nothing is broken now - detection is degraded, which belongs on a dashboard and in a ticket, not on a phone. The same Unknown state also occurs on agents older than 6.2, which have no heartbeat at all; this item cannot see that, agent.version from the stock template can.'
-      dependencies:
-        - name: 'Zabbix agent: configuration not collected'
-          expression: 'nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
-      tags:
-        - tag: component
-          value: agent
-        - tag: scope
-          value: configuration
-    - uuid: c79f77d19b144abba6d9d0b1b2e7a2da
-      expression: 'nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1'
-      name: 'Zabbix agent: configuration not collected'
-      event_name: 'The config guard on {HOST.NAME} has collected nothing for {$AGENT.CONF.NODATA} - ServerActive is no longer being checked'
-      priority: AVERAGE
-      description: 'This guards the check, not the agent. The ServerActive trigger is not time-based, so it is recalculated only when a new value arrives and freezes in its last state - almost always OK - the moment collection stops. Three causes, all visible in the master item error: {$AGENT.CONF.PATH} points at a file that does not exist on this host, the agent may no longer read it, or the agent has stopped performing active checks at all. The last case is the one the stock Active checks are not available trigger misses whenever host availability sits at Unknown rather than Unavailable - measured on a live fleet, 17 agent outages out of 43 were reported only by the 30-minute nodata trigger. That is why this trigger depends on both stock availability triggers and not on the faster one alone. One consequence is worth knowing: an agent that is alive but sends nothing - a wrong or empty ServerActive - puts the 30-minute parent into PROBLEM, so this trigger stays suppressed and the stock alert is the only one raised. Nothing is lost by that, because with no active checks arriving this template collects nothing either; what it does mean is that on Windows the stock alert, not this one, is where that case surfaces. Where neither parent fires, the agent is alive and the fault is in the check itself.'
-      dependencies:
-        - name: 'Windows: Active checks are not available'
-          expression: 'min(/Windows by Zabbix agent active/zabbix[host,active_agent,available],{$AGENT.TIMEOUT})=2'
-        - name: 'Windows: Zabbix agent is not available'
-          expression: 'nodata(/Windows by Zabbix agent active/agent.ping,{$AGENT.NODATA_TIMEOUT})=1'
-      tags:
-        - tag: component
-          value: agent
-        - tag: scope
-          value: configuration
+  - uuid: a1378435c5eb44abac42966b4c268fef
+    expression: find(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,,"regexp","{$AGENT.SERVERACTIVE.MATCHES}")=0
+    name: 'Zabbix agent: ServerActive does not match policy'
+    event_name: 'Zabbix agent on {HOST.NAME}: ServerActive does not match policy'
+    priority: AVERAGE
+    description: The value extracted from the selected file does not match the configured policy. Check {$AGENT.CONF.PATH},
+      the expected topology and {$AGENT.SERVERACTIVE.MATCHES}. A comma denotes independent servers; a semicolon
+      denotes cluster members. Internal whitespace is forbidden by the default policy even though Zabbix accepts
+      spaces. The value may be empty because ServerActive is absent from this file. Include files and running configuration
+      are not inspected. Apply intended connection changes by restarting the agent.
+    dependencies:
+    - name: 'Zabbix agent: configuration not collected'
+      expression: nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1
+        or nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.heartbeat,{$AGENT.CONF.NODATA})=1
+    tags:
+    - tag: component
+      value: agent
+    - tag: scope
+      value: configuration
+    - tag: check
+      value: serveractive
+    opdata: 'Configured ServerActive: {ITEM.LASTVALUE1}; policy: {$AGENT.SERVERACTIVE.MATCHES}'
+    url: https://github.com/IT-for-Prof/zabbix-agent-config-guard/blob/main/README.md#triggers
+    url_name: Configuration guard runbook
+  - uuid: 2f1563041ebc46708ea312e5ca48ff2b
+    expression: last(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.heartbeat)=0
+    name: 'Zabbix agent: active-check heartbeat is disabled'
+    event_name: 'Zabbix agent on {HOST.NAME}: active-check heartbeat is disabled'
+    priority: WARNING
+    description: The selected file declares HeartbeatFrequency equivalent to 0, disabling active-check heartbeats.
+      This degrades the fast availability detector; an agent.ping nodata trigger is still needed as a fallback.
+      Check the selected file and Include files, then restart the agent to apply the intended setting. This reports
+      written configuration and does not prove the running agent has the same setting.
+    dependencies:
+    - name: 'Zabbix agent: configuration not collected'
+      expression: nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1
+        or nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.heartbeat,{$AGENT.CONF.NODATA})=1
+    tags:
+    - tag: component
+      value: agent
+    - tag: scope
+      value: configuration
+    - tag: check
+      value: heartbeat
+    opdata: 'Configured HeartbeatFrequency: {ITEM.LASTVALUE1}'
+    url: https://github.com/IT-for-Prof/zabbix-agent-config-guard/blob/main/README.md#triggers
+    url_name: Configuration guard runbook
+  - uuid: 1cb58db343cd45e1902f589adf1b75e2
+    expression: nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1
+      or nodata(/Zabbix agent config guard Linux by Zabbix agent active/agent.conf.heartbeat,{$AGENT.CONF.NODATA})=1
+    name: 'Zabbix agent: configuration not collected'
+    event_name: 'Zabbix agent on {HOST.NAME}: configuration check data is missing for {$AGENT.CONF.NODATA}'
+    priority: AVERAGE
+    description: 'Either ServerActive or HeartbeatFrequency has received no valid values within {$AGENT.CONF.NODATA}.
+      Configuration checks are incomplete; this does not by itself prove that the configuration is invalid. Check
+      agent availability, the file path and read permission, then errors on the master and both dependent items.
+      No data from a stopped active agent may leave the item state Normal with an empty error. Windows template
+      dependencies suppress this trigger for either stock availability alarm. The Linux export is self-contained:
+      assign dependencies to the local availability triggers at deployment, including the pfSense agent.ping fallback
+      where applicable.'
+    tags:
+    - tag: component
+      value: agent
+    - tag: scope
+      value: configuration
+    - tag: check
+      value: configuration_collection
+    opdata: 'Configuration file: {$AGENT.CONF.PATH}'
+    url: https://github.com/IT-for-Prof/zabbix-agent-config-guard/blob/main/README.md#triggers
+    url_name: Configuration guard runbook
+  - uuid: d1724054d1694813b8cb87a93e9d9e97
+    expression: find(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,,"regexp","{$AGENT.SERVERACTIVE.MATCHES}")=0
+    name: 'Zabbix agent: ServerActive does not match policy'
+    event_name: 'Zabbix agent on {HOST.NAME}: ServerActive does not match policy'
+    priority: AVERAGE
+    description: The value extracted from the selected file does not match the configured policy. Check {$AGENT.CONF.PATH},
+      the expected topology and {$AGENT.SERVERACTIVE.MATCHES}. A comma denotes independent servers; a semicolon
+      denotes cluster members. Internal whitespace is forbidden by the default policy even though Zabbix accepts
+      spaces. The value may be empty because ServerActive is absent from this file. Include files and running configuration
+      are not inspected. Apply intended connection changes by restarting the agent.
+    dependencies:
+    - name: 'Zabbix agent: configuration not collected'
+      expression: nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1
+        or nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.heartbeat,{$AGENT.CONF.NODATA})=1
+    tags:
+    - tag: component
+      value: agent
+    - tag: scope
+      value: configuration
+    - tag: check
+      value: serveractive
+    opdata: 'Configured ServerActive: {ITEM.LASTVALUE1}; policy: {$AGENT.SERVERACTIVE.MATCHES}'
+    url: https://github.com/IT-for-Prof/zabbix-agent-config-guard/blob/main/README.md#triggers
+    url_name: Configuration guard runbook
+  - uuid: 2de0a5f28a894b20bdda2add6bbdb171
+    expression: last(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.heartbeat)=0
+    name: 'Zabbix agent: active-check heartbeat is disabled'
+    event_name: 'Zabbix agent on {HOST.NAME}: active-check heartbeat is disabled'
+    priority: WARNING
+    description: The selected file declares HeartbeatFrequency equivalent to 0, disabling active-check heartbeats.
+      This degrades the fast availability detector; an agent.ping nodata trigger is still needed as a fallback.
+      Check the selected file and Include files, then restart the agent to apply the intended setting. This reports
+      written configuration and does not prove the running agent has the same setting.
+    dependencies:
+    - name: 'Zabbix agent: configuration not collected'
+      expression: nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1
+        or nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.heartbeat,{$AGENT.CONF.NODATA})=1
+    tags:
+    - tag: component
+      value: agent
+    - tag: scope
+      value: configuration
+    - tag: check
+      value: heartbeat
+    opdata: 'Configured HeartbeatFrequency: {ITEM.LASTVALUE1}'
+    url: https://github.com/IT-for-Prof/zabbix-agent-config-guard/blob/main/README.md#triggers
+    url_name: Configuration guard runbook
+  - uuid: c79f77d19b144abba6d9d0b1b2e7a2da
+    expression: nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.serveractive,{$AGENT.CONF.NODATA})=1
+      or nodata(/Zabbix agent config guard Windows by Zabbix agent active/agent.conf.heartbeat,{$AGENT.CONF.NODATA})=1
+    name: 'Zabbix agent: configuration not collected'
+    event_name: 'Zabbix agent on {HOST.NAME}: configuration check data is missing for {$AGENT.CONF.NODATA}'
+    priority: AVERAGE
+    description: 'Either ServerActive or HeartbeatFrequency has received no valid values within {$AGENT.CONF.NODATA}.
+      Configuration checks are incomplete; this does not by itself prove that the configuration is invalid. Check
+      agent availability, the file path and read permission, then errors on the master and both dependent items.
+      No data from a stopped active agent may leave the item state Normal with an empty error. Windows template
+      dependencies suppress this trigger for either stock availability alarm. The Linux export is self-contained:
+      assign dependencies to the local availability triggers at deployment, including the pfSense agent.ping fallback
+      where applicable.'
+    dependencies:
+    - name: 'Windows: Active checks are not available'
+      expression: min(/Windows by Zabbix agent active/zabbix[host,active_agent,available],{$AGENT.TIMEOUT})=2
+    - name: 'Windows: Zabbix agent is not available'
+      expression: nodata(/Windows by Zabbix agent active/agent.ping,{$AGENT.NODATA_TIMEOUT})=1
+    tags:
+    - tag: component
+      value: agent
+    - tag: scope
+      value: configuration
+    - tag: check
+      value: configuration_collection
+    opdata: 'Configuration file: {$AGENT.CONF.PATH}'
+    url: https://github.com/IT-for-Prof/zabbix-agent-config-guard/blob/main/README.md#triggers
+    url_name: Configuration guard runbook
