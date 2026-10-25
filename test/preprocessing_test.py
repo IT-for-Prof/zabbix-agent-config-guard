@@ -8,8 +8,7 @@ during a failover that does not happen.
 
 The scripts are read out of the template YAML rather than copied here, so this check cannot drift
 from what actually ships. Duktape is ES5.1-ish, so the scripts avoid ES6; Node runs them faithfully
-enough for these assertions. Every case below is a row of the README's "Verified behaviour" tables,
-each of which was also executed against a live Zabbix 7.0 server.
+enough for these assertions. The README distinguishes local parser checks from live server checks.
 
 Usage:  python3 test/preprocessing_test.py     (needs python3 + node + PyYAML, no other packages)
 """
@@ -84,11 +83,14 @@ CASES_SA = [
     ("space survives to fail the regexp", "ServerActive=a.example, b.example\n",     "a.example, b.example"),
     ("absent reads empty",                "",                                        ""),
     ("commented out reads empty",         "#ServerActive=mon.example.com\n",         ""),
-    ("indented reads empty",              "  ServerActive=mon.example.com\n",        ""),
-    ("spaces around = read empty",        "ServerActive = mon.example.com\n",        ""),
+    ("indentation accepted",              "  ServerActive=mon.example.com\n",        "mon.example.com"),
+    ("spaces around = accepted",          "ServerActive = mon.example.com\n",        "mon.example.com"),
+    ("leading value space stripped",      "ServerActive= mon.example.com\n",         "mon.example.com"),
+    ("tabs around assignment",            "\tServerActive\t=\tmon.example.com\r\n",  "mon.example.com"),
     ("wrong case reads empty",            "serveractive=mon.example.com\n",          ""),
     ("last line wins",                    "ServerActive=a,b\nServerActive=good\n",   "good"),
     ("last line wins even when broken",   "ServerActive=good\nServerActive=a,b\n",   "a,b"),
+    ("last declaration may be indented",   "ServerActive=old\n ServerActive = new\n", "new"),
 ]
 for label, body, want in CASES_SA:
     check(f"ServerActive: {label}", run(sa, BASE + body), want)
@@ -100,23 +102,34 @@ CASES_HB = [
     ("explicit 60",                    "HeartbeatFrequency=60\n",     "60"),
     ("explicit 0 - the alerting case", "HeartbeatFrequency=0\n",      "0"),
     ("top of the documented range",    "HeartbeatFrequency=3600\n",   "3600"),
-    ("out of range stored as written", "HeartbeatFrequency=3601\n",   "3601"),
-    ("far out of range, still as-is",  "HeartbeatFrequency=99999\n",  "99999"),
     ("last line wins, 0 then 60",      "HeartbeatFrequency=0\nHeartbeatFrequency=60\n", "60"),
     ("last line wins, 60 then 0",      "HeartbeatFrequency=60\nHeartbeatFrequency=0\n", "0"),
     ("commented out",                  "#HeartbeatFrequency=0\n",     "60"),
-    ("indented",                       "  HeartbeatFrequency=0\n",    "60"),
-    ("spaces around =",                "HeartbeatFrequency = 0\n",    "60"),
-    ("leading space in the value",     "HeartbeatFrequency= 0\n",     "60"),
+    ("indented",                       "  HeartbeatFrequency=0\n",    "0"),
+    ("spaces around =",                "HeartbeatFrequency = 0\n",    "0"),
+    ("leading space in the value",     "HeartbeatFrequency= 0\n",     "0"),
     ("wrong case",                     "heartbeatfrequency=0\n",      "60"),
-    ("non-numeric",                    "HeartbeatFrequency=abc\n",    "60"),
-    ("empty value",                    "HeartbeatFrequency=\n",       "60"),
-    ("negative",                       "HeartbeatFrequency=-1\n",     "60"),
+    ("empty value, agent 2 semantics", "HeartbeatFrequency=\n",       "0"),
+    ("agent 2 seconds suffix",         "HeartbeatFrequency=0s\n",     "0"),
+    ("agent 2 signed zero",            "HeartbeatFrequency=+0\n",     "0"),
+    ("agent 2 minute suffix",          "HeartbeatFrequency=1m\n",     "60"),
+    ("agent 2 hour suffix",            "HeartbeatFrequency=1h\n",     "3600"),
+    ("classic agent binary suffix",    "HeartbeatFrequency=1K\n",     "1024"),
+    ("classic agent zero suffix",      "HeartbeatFrequency=0K\n",     "0"),
     ("trailing whitespace stripped",   "HeartbeatFrequency=0   \n",   "0"),
     ("no final newline",               "HeartbeatFrequency=0",        "0"),
 ]
 for label, body, want in CASES_HB:
     check(f"HeartbeatFrequency: {label}", run(hb, BASE + body), want)
+
+for value in ("abc", "-1", "3601", "99999", "4K", "1M"):
+    try:
+        run(hb, BASE + f"HeartbeatFrequency={value}\n")
+    except RuntimeError as error:
+        check(f"HeartbeatFrequency: {value} is rejected explicitly",
+              "Invalid HeartbeatFrequency" in str(error), True)
+    else:
+        check(f"HeartbeatFrequency: {value} is rejected explicitly", "accepted", "error")
 
 # ---------------------------------------------------------------- structure
 # The two templates are deliberate copies - Zabbix refuses two templates defining the same item key
@@ -146,10 +159,22 @@ check("Windows collection trigger depends on both stock availability triggers",
 check("Linux collection trigger stays self-contained",
       deps_of(LINUX, "Zabbix agent: configuration not collected"), set())
 for tpl in (LINUX, WINDOWS):
-    for name in ("Zabbix agent: ServerActive is malformed", "Zabbix agent: active-check heartbeat is disabled"):
+    for name in ("Zabbix agent: ServerActive does not match policy", "Zabbix agent: active-check heartbeat is disabled"):
         os_name = "Windows" if tpl is WINDOWS else "Linux"
         check(f"{os_name}: {name.split(': ')[1]} hangs off the collection trigger",
               deps_of(tpl, name), {"Zabbix agent: configuration not collected"})
+
+    collection = next(t for t in Z["triggers"]
+                      if t["name"] == "Zabbix agent: configuration not collected"
+                      and f"/{tpl}/" in t["expression"])
+    for key in ("agent.conf.serveractive", "agent.conf.heartbeat"):
+        check(f"{tpl}: collection guard detects missing {key}",
+              f"nodata(/{tpl}/{key},{{$AGENT.CONF.NODATA}})=1" in collection["expression"], True)
+
+    description = TEMPLATES[tpl]["description"]
+    check(f"{tpl}: author and repository are discoverable",
+          all(text in description for text in ("Konstantin Tyutyunnik", "https://itforprof.com",
+              "https://github.com/IT-for-Prof/zabbix-agent-config-guard")), True)
 
 print()
 if failures:

@@ -1,251 +1,141 @@
 # Zabbix agent config guard
 
-Reads the Zabbix agent's own configuration file and alerts when `ServerActive` is malformed.
+Checks `ServerActive` policy and active-check heartbeat settings in the Zabbix agent's configuration
+file. Includes Linux/pfSense and Windows variants for Zabbix 7.0 and later.
 
 ## Why this exists
 
-`ServerActive` separates **independent servers** with a comma and **cluster members** with a
-semicolon:
+`ServerActive` separates independent servers with commas and members of one HA cluster or proxy group
+with semicolons:
 
+```ini
+ServerActive=mon2.example.com;mon3.example.com
 ```
-ServerActive=mon2.example.com;mon3.example.com   # one cluster, agent uses one node, fails over
-ServerActive=mon2.example.com,mon3.example.com   # two independent servers, agent sends to both
-```
 
-Writing the comma where the semicolon was meant is **not fatal and therefore silent**. The agent
-still reaches a reachable address, data keeps arriving, every dashboard stays green — and the
-failover the configuration was supposed to provide does not exist. Nothing in Zabbix reports it.
-
-It cannot be detected from the server side. Both forms produce an identical stream of active checks
-as far as the receiving node is concerned. And no agent key returns the running configuration —
-`agent.hostname` is the only config parameter an agent will disclose, by accident of the protocol.
-The file is the only surface there is.
+A comma in place of the semicolon keeps data flowing but changes the intended failover topology.
+The default policy rejects commas, empty values and internal whitespace. Zabbix itself permits
+independent servers and whitespace in address lists: this policy is not a complete syntax validator.
+Override `{$AGENT.SERVERACTIVE.MATCHES}` where a different topology is intentional.
 
 ## What it monitors
 
-| Item | Key | Notes |
+| Item | Key | Collection and storage |
 |---|---|---|
-| Agent config file | `vfs.file.contents[{$AGENT.CONF.PATH}]` | Master item, `history: 0` — nothing is stored |
-| Effective ServerActive | `agent.conf.serveractive` | Dependent, takes the **last** matching line |
-| Effective HeartbeatFrequency | `agent.conf.heartbeat` | Dependent, same last-line rule, returns the agent default 60 when absent |
+| Configuration file | `vfs.file.contents["{$AGENT.CONF.PATH}"]` | Active check every 1h; raw file history is disabled |
+| Written ServerActive | `agent.conf.serveractive` | Dependent item; last matching declaration; 7d history |
+| Written heartbeat interval | `agent.conf.heartbeat` | Dependent item; seconds; 7d history |
 
-The last-line rule is not pedantry. A duplicated `ServerActive=` after a hand edit is applied by the
-agent in file order, so a first-match read — which is all `vfs.file.regexp` can do — reports the
-stale line and shows green on a broken host.
+Both parsers accept indentation and whitespace around `=`. Comments and other parameter names are
+ignored. `ServerActive` remains a CHAR item with a 255-character limit; longer values require a planned
+move to TEXT that checks history compatibility.
+
+The heartbeat parser accepts integer seconds, agent 2 time suffixes (`s`, `m`, `h`, `d`, `w`) and
+classic-agent binary suffixes (`K`, `M`, `G`, `T`). Examples: `1m` becomes 60; `1K` becomes 1024;
+`0`, `0s` and `0K` become 0. The absent parameter defaults to 60. An explicitly empty value becomes 0
+according to agent 2 rules. Invalid or out-of-range intervals produce a preprocessing error.
+
+This normalization does not prove that the installed agent accepts that spelling. For example,
+classic agent 7.0.32 accepts `1K` but rejects `0s`, `+0` and an empty value; agent 2 accepts the latter
+forms. Validate edited configuration with the installed agent before restarting it.
 
 ## Triggers
 
-```
-Windows only, from the stock template:
-Windows: Active checks are not available   HIGH      (5 min, heartbeat)
-Windows: Zabbix agent is not available     AVERAGE   (30 min, nodata)
-   └─ Zabbix agent: configuration not collected   AVERAGE   (guards the check)
-        ├─ Zabbix agent: ServerActive is malformed             AVERAGE
-        └─ Zabbix agent: active-check heartbeat is disabled    WARNING
-
-Linux: the same three guard triggers, with no stock parent.
-```
-
-Severity is **AVERAGE** rather than WARNING for one operational reason: many estates route
-notifications by severity, and a WARNING-only trigger reaches the dashboard but no one's phone. Lower
-it to WARNING where a config-hygiene check should stay dashboard-only.
-
-The root trigger is the non-obvious one. `find(...,"regexp",...)` contains no date/time function, so
-it is recalculated **only when a new value arrives**. The moment collection stops, the malformed
-trigger freezes in whatever state it held last — almost always OK — and the check silently stops
-being a check. `nodata()` on the same item catches that, and the master item's error text names the
-cause: wrong path, no read permission, or an agent that has stopped doing active checks at all.
-
-That last case matters more than it looks. The stock *Active checks are not available* trigger fires
-on host availability **Unavailable**; a host whose availability never leaves **Unknown** is never
-covered by it. This guard does not care about the distinction.
-
-### Why the Windows template depends on the stock triggers and the Linux one does not
-
-A dead agent makes this trigger fire three hours later on top of whatever already reported the agent
-itself, so the collection trigger is a candidate for a dependency. In the Windows template it has one,
-on **both** stock availability triggers; in the Linux template it has none. That asymmetry is measured,
-not stylistic.
-
-Over 90 days on the fleet this was built for, the collection trigger fired 12 times. Four of those
-duplicated an agent-availability alert, and all four were Windows hosts. Zero Linux duplicates.
-
-The cost side decided the rest. A dependency on another template makes this one unlinkable without it —
-Zabbix refuses the link when a trigger dependency cannot be resolved, which the repository's own test
-run confirmed against a live server. Every Windows host that carries this guard runs
-`Windows by Zabbix agent active`, so the requirement costs nothing there. On Linux it would have cost
-two hosts: pfSense firewalls, which run a Zabbix agent and need this check as much as anything else on
-the fleet, but cannot take `Linux by Zabbix agent active` at all — 22 of its item keys collide with
-`Template pfSense Active`. Coupling the Linux template would have meant dropping the guard on exactly
-the two hosts whose `ServerActive` matters most, to suppress zero measured duplicates.
-
-Both stock triggers are named rather than only the faster one, because the fast one is not reliable:
-of 43 agent outages, 26 were reported by both, and **17 by the 30-minute `nodata()` trigger only** —
-the heartbeat had gone to Unknown rather than Unavailable, so the 5-minute trigger stayed silent. This
-was also reproduced live: a host with a dead agent sat at `zabbix[host,active_agent,available] = 0`
-(Unknown), not 2. Zabbix suppresses a dependent trigger while **any** parent is in PROBLEM, so naming
-both costs nothing, and `ServerActive is malformed` inherits the suppression through its own parent —
-dependencies are evaluated recursively.
-
-Where neither parent fires, the agent is alive and the fault is in the check itself — which is exactly
-what this trigger is for.
-
-### Why the heartbeat matters enough to have its own trigger
-
-`HeartbeatFrequency` (agent 6.2 and newer, default 60 s, range 0–3600, `0` disables it) is the only
-thing that lets a server tell a dead agent from a quiet one. Active checks are silent by nature — an
-item with a 1-hour interval sends nothing for an hour, and that is not a fault — so the server relies on
-the heartbeat to maintain `zabbix[host,active_agent,available]`. With `HeartbeatFrequency=0` that value
-never leaves **Unknown (0)**, and the stock *Active checks are not available* trigger waits for **2**.
-It can therefore never fire on such a host, silently, with no error anywhere.
-
-What is left there is the stock 30-minute `nodata(agent.ping)` trigger. Measured on a live fleet over
-90 days: of 43 agent outages, **17 were reported by the 30-minute trigger alone** — a 25-minute wider
-window on every one of them. That is what this trigger is for: not the outage, but the fact that the
-fast detector is switched off on this host and nobody knows.
-
-It is WARNING rather than AVERAGE because nothing is broken at the moment it fires — detection is
-degraded, which belongs on a dashboard and in a ticket rather than on a phone.
-
-The same Unknown state also occurs on agents older than 6.2, which have no heartbeat at all. This item
-cannot see that — the parameter is simply absent there and reads as the default — but `agent.version`
-from the stock template can.
-
-## Verified behaviour
-
-Every row below was executed against a live Zabbix 7.0 server, not reasoned about — the value was
-pushed through the real master item, the real JavaScript preprocessing and the real trigger.
-
-| Config line | Stored value | Trigger |
+| Trigger | Severity | Meaning |
 |---|---|---|
-| `ServerActive=mon.example.com` | `mon.example.com` | ok |
-| `ServerActive=a.example;b.example` | `a.example;b.example` | ok |
-| `ServerActive=mon.example.com:10051` | `mon.example.com:10051` | ok |
-| `ServerActive=[::1]:10051` | `[::1]:10051` | ok |
-| `ServerActive=mon.example.com   ` | `mon.example.com` | ok — trailing space stripped |
-| CRLF file, valid value | `mon.example.com` | ok — CR stripped |
-| `ServerActive=a.example,b.example` | `a.example,b.example` | **PROBLEM** |
-| `ServerActive=a.example, b.example` | `a.example, b.example` | **PROBLEM** |
-| `ServerActive=a.example; b.example` | `a.example; b.example` | **PROBLEM** |
-| `ServerActive=a.example<TAB>b.example` | as written | **PROBLEM** |
-| `ServerActive=mon.example.com,` | `mon.example.com,` | **PROBLEM** |
-| `ServerActive=` | `` | **PROBLEM** |
-| parameter absent | `` | **PROBLEM** |
-| `#ServerActive=mon.example.com` | `` | **PROBLEM** |
-| `  ServerActive=mon.example.com` | `` | **PROBLEM** |
-| `ServerActive = mon.example.com` | `` | **PROBLEM** |
-| `serveractive=mon.example.com` | `` | **PROBLEM** |
-| duplicate lines, malformed then valid | `mon.example.com` | ok |
-| duplicate lines, valid then malformed | the malformed one | **PROBLEM** |
+| Configuration not collected | Average | Either derived item received no valid data for `{$AGENT.CONF.NODATA}` |
+| ServerActive does not match policy | Average | The extracted value fails `{$AGENT.SERVERACTIVE.MATCHES}` |
+| Active-check heartbeat is disabled | Warning | The configured heartbeat interval is 0 |
 
-The last four "no match" rows return an **empty string** rather than throwing. Throwing looks
-tidier and is wrong: it puts the item into an unsupported state, which puts the trigger into
-UNKNOWN, and the heaviest case of all — `ServerActive` missing entirely — then waits three hours for
-the `nodata` guard instead of alerting at once. An empty value fails the regexp and alerts
-immediately.
+Both configuration alarms depend on the collection alarm. The collection expression uses `nodata()`
+on **both** derived items: it detects a stopped agent, an unreadable file, and a heartbeat parser error
+while ServerActive continues updating. Do not add discard-unchanged preprocessing to this chain
+without adjusting its missing-data window.
 
-The regexp default was chosen the same way:
+A silent active agent can leave item state Normal and an empty error. First check agent availability;
+then inspect the master and dependent items for path, permission and preprocessing errors. The raw
+file is transferred for processing even though it is not retained in item history.
 
-| `{$AGENT.SERVERACTIVE.MATCHES}` | `a;b` | `a; b` | `a<TAB>b` |
-|---|---|---|---|
-| `^[^,\s]+$` (default) | ok | fires | fires |
-| `^[^,[:space:]]+$` | ok | fires | fires |
-| `^[^,]+$` | ok | **misses** | **misses** |
-| `^[^,; ]+$` | **false alarm** | fires | **misses** |
+### Availability dependencies
 
-`nodata` was measured too: with a 5 m window the trigger fires 5 m 19 s after the last value,
-identically on the master and on the dependent item.
+```text
+Agent availability: heartbeat OR agent.ping nodata
+└─ Configuration not collected
+   ├─ ServerActive does not match policy
+   └─ Active-check heartbeat is disabled
+```
 
-`HeartbeatFrequency` was put through the same treatment — every row executed, not reasoned about:
+Use **both** availability parents where available. Heartbeat availability can remain Unknown (0),
+so the fast trigger checking Unavailable (2) is not a substitute for `nodata(agent.ping)`.
+Dependencies are recursive; an existing problem is not closed retroactively by adding a dependency.
 
-| Config line | Stored value | Meaning |
-|---|---|---|
-| parameter absent | `60` | the agent default, which is what the agent applies |
-| `HeartbeatFrequency=60` / `=0` / `=3600` | `60` / `0` / `3600` | as written |
-| duplicate lines, `0` then `60` | `60` | last line wins, as the agent applies them |
-| duplicate lines, `60` then `0` | `0` | same rule |
-| `#HeartbeatFrequency=0` | `60` | commented out, so the default applies |
-| `  HeartbeatFrequency=0` (indented) | `60` | the agent does not accept an indented parameter |
-| `HeartbeatFrequency = 0` | `60` | nor spaces around the separator |
-| `HeartbeatFrequency= 0` | `60` | nor a leading space in the value |
-| `heartbeatfrequency=0` | `60` | parameter names are case-sensitive |
-| `HeartbeatFrequency=0   ` | `0` | trailing whitespace stripped |
-| CRLF file, `HeartbeatFrequency=0` | `0` | CR stripped |
-| last line with no newline | `0` | read correctly |
-| `HeartbeatFrequency=abc`, empty, or `-1` | `60` | reads as the default here; the agent refuses to start on it, which the availability triggers report |
-| `HeartbeatFrequency=3600` | `3600` | the top of the documented range |
-| `HeartbeatFrequency=3601` or `=99999` | as written | **not** normalised to 60: the item shows what the file says. The agent refuses to start on an out-of-range value, and that is reported by the availability triggers and by the collection trigger, not by this item. A digit string past the 64-bit range is the one exception — it makes the item unsupported instead |
+- **Windows:** the export depends on both stock triggers from `Windows by Zabbix agent active`.
+  Link that template to the same host. After linking or updating, check that the inherited dependencies
+  reference availability triggers on that host, rather than the template's trigger IDs.
+- **Linux:** the export stays self-contained. During deployment, add host-level dependencies from
+  its collection trigger to both local stock Linux availability triggers.
+- **pfSense:** keep the standalone Linux variant and use the existing local agent-ping missing-data
+  trigger. Do not link the stock Linux OS template: it conflicts with pfSense item keys.
 
-## What it deliberately does NOT do
-
-This template reads **written intent**, not running state, and says so rather than implying more:
-
-- **An edited file is not an applied file.** The agent re-reads its configuration only on restart. A
-  fixed file clears the alert while the old value is still in effect, and the reverse.
-- **`Include` files are invisible.** A `ServerActive` set in an included file overrides the main
-  config and is not read here. On the estate this was built for, the include directory holds only
-  `zabbix-agent2-plugin-*` package configs, which never carry connection settings — measured, not
-  assumed. Re-check that assumption before relying on it elsewhere.
-- **Semantics are out of reach.** `a;b` where `a` and `b` are genuinely different servers is wrong
-  and passes. So does a perfectly formed address pointing at the wrong proxy for the host's
-  assignment — that would need to be compared against the host's `monitored_by`, which no trigger
-  expression can reach.
-- **Passive-only hosts are out of scope.** `ServerActive` is never used there, so a stale value is
-  dormant rather than operational. Link the template when such a host is converted to active checks.
-
-## Requirements
-
-- Zabbix server **7.0 or later**, Zabbix agent 2 (or agent 1) **with active checks enabled**.
-- The agent must be able to read its own config file. It is `0644 root:root` by default; hardening it
-  to `0600` breaks the check, which the collection trigger reports rather than hides.
-- The config file must be under **64 KB** — the `vfs.file.contents` limit. A stock `zabbix_agent2.conf`
-  is around 26 KB.
-- Link **one** of the two templates per host. Both define the same keys and Zabbix refuses the second.
-- **Windows template only:** the stock **`Windows by Zabbix agent active`** must be linked to the same
-  host. The collection trigger depends on its two availability triggers, and Zabbix refuses to link a
-  template whose trigger dependency cannot be resolved. The Linux template has no such requirement and
-  stays self-contained — see *Triggers* for why the two differ. Note that this file carries both templates,
-  so the stock one must at least **exist** on the server for the import itself to succeed; it has to be
-  linked to the host only where the Windows variant is.
+Host-level dependencies are deployment settings and are not contained in a template export.
+Recheck them after importing, relinking or onboarding a host. Keep existing unrelated dependencies
+when adding availability parents. Use a collection window longer than the availability windows.
 
 ## Macros
 
 | Macro | Default | Meaning |
 |---|---|---|
-| `{$AGENT.CONF.PATH}` | `/etc/zabbix/zabbix_agent2.conf` (Windows: `C:\Program Files\Zabbix Agent 2\zabbix_agent2.conf`) | Absolute path of the agent config file |
-| `{$AGENT.SERVERACTIVE.MATCHES}` | `^[^,\s]+$` | Regexp every legitimate value must match |
-| `{$AGENT.CONF.NODATA}` | `3h` | Silence of the check itself before alerting (~3× the item interval) |
+| `{$AGENT.CONF.PATH}` | `/etc/zabbix/zabbix_agent2.conf` | File to inspect; Windows default is `C:\Program Files\Zabbix Agent 2\zabbix_agent2.conf` |
+| `{$AGENT.SERVERACTIVE.MATCHES}` | `^[^,\s]+$` | ServerActive deployment policy |
+| `{$AGENT.CONF.NODATA}` | `3h` | Missing-data window for either derived item; three times the collection interval |
 
-The default regexp encodes a policy — *this estate has one Zabbix cluster, therefore no commas* —
-rather than a hostname, so it survives estates with several correct values. Tighten it to the exact
-expected string where there is only one.
+Use the agent 1 configuration path when applicable. The service account must be able to read the
+selected file; the size limits of `vfs.file.contents` depend on the agent version. There is no universal
+64 KB limit: agent 2 versions 7.0.0 and 7.0.32 both read a 70,001-byte test file.
 
-## Cost
+## Applicability and limitations
 
-One 1-hour active check per host, transferring the config file; the master stores nothing and the
-dependent stores one short string. On 61 hosts that is roughly 1.5 MB/hour of traffic and a few
-kilobytes a day of history.
+- Active checks must be enabled. On a passive-only host, ServerActive is not used.
+- Heartbeat-based availability needs agent version 6.2 or newer. An absent parameter on an older
+  agent does not mean that agent supports heartbeats.
+- Link only one variant to a host: they define the same item keys.
+- This reads a selected file, not the running configuration. Restart the agent to apply connection changes.
+- Include files are not read and can contain a different effective value.
+- The template does not validate DNS, reachability or whether an address matches the assigned proxy.
 
-## Install
+## Install and update
 
-Import `zabbix-agent-config-guard.yaml`, link the Linux or Windows template to hosts that use active
-checks. Nothing else — the macros carry working defaults.
+Import `zabbix-agent-config-guard.yaml`, link the appropriate variant and set host macros as needed.
+Preserve UUIDs and use `deleteMissing: false`. Keep the source file and live templates at the same version.
 
-`python3 test/preprocessing_test.py` re-runs both tables above against the scripts as they ship, plus the
-dependency wiring, in about a second. It reads the scripts out of the YAML rather than copying them, so it
-cannot pass against a stale copy; it needs `node` and PyYAML and nothing else.
+The published templates belong to `Templates/Modules`. Template vendor metadata identifies
+`itforprof.com`; the `vendor: zabbix` tag identifies the monitored product. Items and triggers retain
+`component: agent` and `scope: configuration`; `check` distinguishes collection, ServerActive and heartbeat.
+Trigger links open this runbook, and operational data shows the configured path or extracted setting.
 
-Two notes on timing and tooling:
+When using the local MCP wrapper, compare before import. Import template metadata and items separately
+from trigger updates if the wrapper cannot handle the trigger sections. The comparison may omit
+trigger changes: re-read and verify each trigger expression and dependency explicitly after deployment.
+Do not replace an import with deleting and recreating templates or items.
 
-- A newly linked active item reaches the agent in a few minutes directly, and up to about 15 minutes
-  through a proxy. Changed preprocessing needs one `CacheUpdateFrequency` cycle (60 s by default)
-  before the server applies it — a check run inside that window reports the old behaviour.
-- Import through the frontend or `zabbix_utils`. The `mcp__zabbix` wrapper fails on `triggers:`
-  sections and on block scalars; import the items and create the triggers via `trigger.create` if
-  that is the only path available.
+Allow one server configuration-cache cycle (normally 60s) after changes. Agents and proxies may take
+longer to receive active-check configuration; the 1h file interval remains unchanged.
+
+## Validation
+
+Run `python3 test/preprocessing_test.py` with Python 3, PyYAML and Node.js. It reads the JavaScript from
+both exported variants and checks parsing, explicit failures, collection coverage and dependency wiring.
+
+Agent configuration tests used official agent 2 packages 7.0.0 and 7.0.32 and classic agent 7.0.32 on
+Ubuntu. Native Windows and pfSense execution is separate from those checks. Server-side validation
+uses isolated trapper-fed copies of the real preprocessing and trigger expressions, with a shortened
+missing-data window; it does not stop agents on production hosts.
+
+See the [1.2.0 validation report](docs/validation/2026-10-25-release-1.2.0.md) for measured timings
+and deployment verification.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
 Author: Konstantin Tyutyunnik / Константин Тютюнник · <https://itforprof.com>
+Repository: <https://github.com/IT-for-Prof/zabbix-agent-config-guard>
